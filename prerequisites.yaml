@@ -1,0 +1,260 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Prerequisites stack for the To-Do app lab. Lives in its OWN repository and is
+  deployed by CloudFormation GitSync BEFORE the main infrastructure repo, so
+  everything CI/CD needs on day zero already exists:
+
+    - the S3 bucket that holds the infra repo's nested-stack child templates
+    - the ECR repository the app repo pushes images to
+    - the OIDC role the INFRA repo's GitHub Actions assumes (template upload)
+    - the OIDC role the APP repo's GitHub Actions assumes (ECR push + bundle)
+
+  Keeping these in a separate, earlier-lifecycle stack removes the
+  chicken-and-egg race: the infra repo's own workflow needs the bucket + role
+  to exist before it can upload templates, and the main stack's ECS service
+  needs the ECR repository to exist before its first deploy. This template is
+  flat (no nested stacks), so GitSync can deploy it with no template bucket.
+
+  Both GitHub Actions roles are scoped to a single BRANCH (ref:refs/heads/...),
+  not the whole repository.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: todo-app
+  GitHubOrg:
+    Type: String
+    Description: GitHub user/org that owns the repositories
+    Default: Adamsmiracle
+  InfraRepoName:
+    Type: String
+    Description: repo holding the CloudFormation templates
+    Default: cloudformation_infra
+  InfraBranch:
+    Type: String
+    Description: only this branch of the infra repo may assume the upload role
+    Default: todo
+  AppRepoName:
+    Type: String
+    Description: repo holding the application source code
+    Default: aws_lab_applications
+  AppBranch:
+    Type: String
+    Description: only this branch of the app repo may assume the push role
+    Default: todo
+
+Resources:
+  # ---------------------------------------------------------------------------
+  # S3 bucket holding the infra repo's child CloudFormation templates
+  # ---------------------------------------------------------------------------
+  TemplatesBucket:
+    Type: AWS::S3::Bucket
+    # Keep templates around if this stack is ever deleted.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Sub "${ProjectName}-cfn-templates-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+            BucketKeyEnabled: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireOldVersions
+            Status: Enabled
+            NoncurrentVersionExpirationInDays: 30
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+
+  # Deny non-TLS access; let CloudFormation read templates for nested stacks.
+  TemplatesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref TemplatesBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: s3:*
+            Resource:
+              - !GetAtt TemplatesBucket.Arn
+              - !Sub "${TemplatesBucket.Arn}/*"
+            Condition:
+              Bool:
+                "aws:SecureTransport": "false"
+          - Sid: AllowCloudFormationRead
+            Effect: Allow
+            Principal:
+              Service: cloudformation.amazonaws.com
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource: !Sub "${TemplatesBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  # ---------------------------------------------------------------------------
+  # ECR repository for the application image (pushed by the app repo's CI,
+  # pulled by ECS through the VPC endpoints)
+  # ---------------------------------------------------------------------------
+  EcrRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub "${ProjectName}-app"
+      ImageTagMutability: MUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+
+  # ---------------------------------------------------------------------------
+  # OIDC role for the INFRA repo's GitHub Actions: upload child templates and
+  # nudge the parent stack. Scoped to one branch only.
+  # ---------------------------------------------------------------------------
+  InfraGitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-infra-gha-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${InfraRepoName}:ref:refs/heads/${InfraBranch}"
+      Policies:
+        - PolicyName: UploadTemplatesAndTriggerUpdates
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Upload child templates
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt TemplatesBucket.Arn
+                  - !Sub "${TemplatesBucket.Arn}/*"
+              # After upload, trigger CFN to re-evaluate the parent stack
+              # (otherwise child template changes go unnoticed).
+              - Effect: Allow
+                Action:
+                  - cloudformation:UpdateStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:DescribeStackEvents
+                  - cloudformation:GetTemplate
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:DeleteChangeSet
+                Resource:
+                  - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}/*"
+                  - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/*"
+
+  # ---------------------------------------------------------------------------
+  # OIDC role for the APP repo's GitHub Actions: push the image to ECR and
+  # publish deploy-bundle.zip (taskdef + appspec) to the deploy-source bucket.
+  # Scoped to one branch only. The deploy-source bucket is created later by the
+  # main stack's pipeline layer, so its ARN is name-derived here.
+  # ---------------------------------------------------------------------------
+  AppGitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${ProjectName}-github-actions-ecr-push-role"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !Sub "arn:aws:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub "repo:${GitHubOrg}/${AppRepoName}:ref:refs/heads/${AppBranch}"
+      Policies:
+        - PolicyName: EcrPushAndDeployBundle
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:CompleteLayerUpload
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !GetAtt EcrRepository.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource: !Sub "arn:aws:s3:::${ProjectName}-deploy-source-${AWS::AccountId}-${AWS::Region}/*"
+
+Outputs:
+  TemplatesBucketName:
+    Description: S3 bucket holding child CloudFormation templates
+    Value: !Ref TemplatesBucket
+    Export:
+      Name: !Sub "${ProjectName}-templates-bucket"
+
+  TemplatesBucketUrl:
+    Description: Base URL used in the main stack's TemplatesBaseUrl parameter
+    Value: !Sub "https://s3.${AWS::Region}.amazonaws.com/${TemplatesBucket}"
+
+  EcrRepositoryName:
+    Value: !Ref EcrRepository
+    Export:
+      Name: !Sub "${ProjectName}-ecr-repo-name"
+
+  EcrRepositoryUri:
+    Value: !GetAtt EcrRepository.RepositoryUri
+    Export:
+      Name: !Sub "${ProjectName}-ecr-repo-uri"
+
+  InfraGitHubActionsRoleArn:
+    Description: Set as TODO_INFRA_GHA_ROLE_ARN secret in the infra repo
+    Value: !GetAtt InfraGitHubActionsRole.Arn
+
+  AppGitHubActionsRoleArn:
+    Description: Set as AWS_ROLE_ARN_TODO secret in the app repo
+    Value: !GetAtt AppGitHubActionsRole.Arn

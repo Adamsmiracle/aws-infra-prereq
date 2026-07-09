@@ -1,0 +1,11 @@
+template-file-path: prerequisites.yaml
+parameters:
+  ProjectName: todo-app
+  GitHubOrg: Adamsmiracle
+  InfraRepoName: cloudformation_infra
+  InfraBranch: todo
+  AppRepoName: aws_lab_applications
+  AppBranch: todo
+tags:
+  Project: todo-app
+  Layer: prerequisites
