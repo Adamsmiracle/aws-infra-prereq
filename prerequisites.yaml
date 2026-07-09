@@ -21,7 +21,7 @@ Description: >
 Parameters:
   ProjectName:
     Type: String
-    Default: todo-app
+    Default: todo
   GitHubOrg:
     Type: String
     Description: GitHub user/org that owns the repositories
