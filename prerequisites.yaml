@@ -191,6 +191,7 @@ Resources:
                   - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ParentStackName}/*"
                   - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/*"
 
+
   # ---------------------------------------------------------------------------
   # OIDC role for the APP repo's GitHub Actions: push the image to ECR and
   # publish deploy-bundle.zip (taskdef + appspec) to the deploy-source bucket.
