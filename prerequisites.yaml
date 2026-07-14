@@ -22,6 +22,10 @@ Parameters:
   ProjectName:
     Type: String
     Default: todo-app
+  ParentStackName:
+    Type: String
+    Description: CloudFormation stack name of the main (parent) GitSync stack
+    Default: todo
   GitHubOrg:
     Type: String
     Description: GitHub user/org that owns the repositories
@@ -184,7 +188,7 @@ Resources:
                   - cloudformation:ExecuteChangeSet
                   - cloudformation:DeleteChangeSet
                 Resource:
-                  - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ProjectName}/*"
+                  - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${ParentStackName}/*"
                   - !Sub "arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:changeSet/*"
 
   # ---------------------------------------------------------------------------

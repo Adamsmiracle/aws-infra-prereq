@@ -1,6 +1,7 @@
 template-file-path: prerequisites.yaml
 parameters:
   ProjectName: todo-app
+  ParentStackName: todo
   GitHubOrg: Adamsmiracle
   InfraRepoName: cloudformation_infra
   InfraBranch: todo

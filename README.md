@@ -17,7 +17,7 @@ deploy it directly from this repo with no template bucket required.
 ## Deploy order
 
 1. **This repo** — connect it to CloudFormation GitSync (stack name
-   `todo-app-prereqs`, deployment file `deployment.yaml`). One manual
+   `prereq`, deployment file `deployment.yaml`). One manual
    prerequisite remains account-level: the GitHub OIDC provider
    (`token.actions.githubusercontent.com`) must exist in IAM.
 2. Copy the stack outputs into repo secrets:
