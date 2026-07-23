@@ -78,6 +78,7 @@ Resources:
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 1
 
+
   # Deny non-TLS access; let CloudFormation read templates for nested stacks.
   TemplatesBucketPolicy:
     Type: AWS::S3::BucketPolicy
